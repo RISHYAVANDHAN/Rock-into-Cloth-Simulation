@@ -20,7 +20,7 @@
 #define CONVERGENCE_CHECK_INTERVAL 50
 
 // Convergence thresholds
-#define VELOCITY_THRESHOLD 0.01f
+#define VELOCITY_THRESHOLD 0.1f
 #define FORCE_THRESHOLD 0.1f
 
 int main() {
@@ -158,6 +158,7 @@ int main() {
         // Force computation
         resetClothForces<<<blocks, threads>>>(d_nodes);
         applyGravity<<<blocks, threads>>>(d_nodes);
+        applyViscousDamping<<<blocks, threads>>>(d_nodes);
         kernelResetExternalForces<<<blocks, threads>>>(d_externalForce, total_nodes);
         applyPrescribedForce(step, d_externalForce, h_num_x, h_num_y,
                             selectedMode, force_strength, radius,

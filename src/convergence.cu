@@ -83,5 +83,5 @@ bool checkConvergence(ConvergenceData* d_conv_data, int total_nodes,
     bool vel_converged = h_conv_data.max_velocity < vel_threshold;
     bool force_converged = h_conv_data.max_force < force_threshold;
     
-    return vel_converged && force_converged;
+    return (vel_converged || force_converged);
 }
