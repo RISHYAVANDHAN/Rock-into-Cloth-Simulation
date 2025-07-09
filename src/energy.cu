@@ -1,5 +1,6 @@
 // ==================== energy.cu ====================
 #include "energy.cuh"
+#include "params.cuh"
 
 __global__ void computeKineticEnergy(ClothNode* nodes, float* kinetic_energy) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -50,6 +51,12 @@ __global__ void computePotentialEnergy(ClothNode* nodes, Spring* springs, int nu
         float dist = length(dir);
         float strain = dist - L0;
         
+        float ks = 0.0f;
+        switch (spring.type) {
+        case 0: ks = ks_structural; break;
+        case 1: ks = ks_shear; break;
+        case 2: ks = ks_bend; break;
+        }
         // Spring potential energy: U = 0.5 * k * (strain)^2
         shared_pe[tid] = 0.5f * ks * strain * strain;
         

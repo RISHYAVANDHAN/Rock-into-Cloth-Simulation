@@ -16,12 +16,4 @@ void endFrame();
 // CUDA–OpenGL interop
 void renderCloth(int step, float3* d_clothPositions);
 
-// GUI controls
-void renderGUI(float3* forceDir,
-               float* strength,
-               int* tStart,
-               int* tEnd,
-               int* radius,
-               std::string* mode);
-
 #endif

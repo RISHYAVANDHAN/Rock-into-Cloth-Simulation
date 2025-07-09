@@ -34,50 +34,42 @@ __global__ void kernelResetExternalForces(float3* externalForces, int total) {
     }
 }
 
-void applyPrescribedForce(int step,
-                          float3* d_externalForces,
-                          int Nx, int Ny,
-                          const std::string& mode,
-                          float strength,
-                          int radius,
-                          int start_step,
-                          int end_step) {
+void applyPrescribedForce(int step, float3* d_externalForces, int Nx, int Ny, const std::string& mode,
+                          float strength, int radius, int start_step, int end_step) {
     if (step < start_step || step > end_step) return;
 
     std::vector<float3> h_force(Nx * Ny, make_float3(0.0f, 0.0f, 0.0f));
-
     int cx = Nx / 2;
     int cy = Ny / 2;
+
+    float phase = 4.0f * M_PI * (step - start_step) / (end_step - start_step);
+    float oscillation = sin(phase);
+    float directional_strength = strength;
 
     for (int j = 0; j < Ny; ++j) {
         for (int i = 0; i < Nx; ++i) {
             int id = j * Nx + i;
+            float3 force = make_float3(0.0f, 0.0f, 0.0f);
 
             if (mode == "point") {
                 if (i == cx && j == cy)
-                    h_force[id] = make_float3(0.0f, -strength, 0.0f);
-            }
-            else if (mode == "patch") {
+                    force = make_float3(0.0f, directional_strength, 0.0f);
+            } else if (mode == "patch") {
                 if (abs(i - cx) <= radius && abs(j - cy) <= radius)
-                    h_force[id] = make_float3(0.0f, -strength, 0.0f);
-            }
-            else if (mode == "line") {
+                    force = make_float3(0.0f, directional_strength, 0.0f);
+            } else if (mode == "line") {
                 if (j == cy)
-                    h_force[id] = make_float3(0.0f, -strength, 0.0f);
-            }
-            else if (mode == "gaussian") {
+                    force = make_float3(0.0f, directional_strength, 0.0f);
+            } else if (mode == "gaussian") {
                 float dx = float(i - cx);
                 float dy = float(j - cy);
                 float dist2 = dx * dx + dy * dy;
                 float sigma2 = float(radius * radius);
-                float factor = std::exp(-dist2 / (2.0f * sigma2));
-                h_force[id] = make_float3(0.0f, -strength * factor, 0.0f);
+                float factor = exp(-dist2 / (2.0f * sigma2));
+                force = make_float3(0.0f, directional_strength * factor, 0.0f);
             }
 
-            float len = length(h_force[id]);
-            if (len > 1000.0f) {
-                h_force[id] = (h_force[id] / len) * 1000.0f;
-            }
+            h_force[id] = force;
         }
     }
 

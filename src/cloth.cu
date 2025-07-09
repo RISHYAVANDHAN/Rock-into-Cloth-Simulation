@@ -5,7 +5,6 @@
 __host__ void initializeClothGrid(ClothNode* d_nodes, int num_x, int num_y, float clothWidth, float clothHeight) {
     ClothNode* h_nodes = new ClothNode[num_x * num_y];
 
-    // Center cloth at origin
     const float halfWidth = clothWidth / 2.0f;
     const float halfHeight = clothHeight / 2.0f;
 
@@ -13,21 +12,21 @@ __host__ void initializeClothGrid(ClothNode* d_nodes, int num_x, int num_y, floa
         for (int x = 0; x < num_x; ++x) {
             int i = y * num_x + x;
 
+            float rand_z = 0.001f * ((rand() % 100) / 100.0f - 0.5f);  // Z-perturbation
             h_nodes[i].index = i;
             h_nodes[i].pos = make_float3(
                 x * (clothWidth / (num_x - 1)) - halfWidth,
                 y * (clothHeight / (num_y - 1)) - halfHeight,
-                0.0f
+                rand_z
             );
             h_nodes[i].vel = make_float3(0.0f, 0.0f, 0.0f);
             h_nodes[i].force = make_float3(0.0f, 0.0f, 0.0f);
 
-            // Pin only the 4 corners
             h_nodes[i].pinned =
-                (x == 0 && y == 0) ||                            // top-left
-                (x == num_x - 1 && y == 0) ||                    // top-right
-                (x == 0 && y == num_y - 1) ||                    // bottom-left
-                (x == num_x - 1 && y == num_y - 1);              // bottom-right
+                (x == 0 && y == 0) ||
+                (x == num_x - 1 && y == 0) ||
+                (x == 0 && y == num_y - 1) ||
+                (x == num_x - 1 && y == num_y - 1);
         }
     }
 
@@ -68,7 +67,6 @@ __global__ void applyPinningConstraints(ClothNode* nodes) {
     }
 }
 
-// FIXED: Correct spring force calculation and application
 __global__ void applySpringForces(ClothNode* nodes, Spring* springs, int numSprings) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numSprings) return;
@@ -85,24 +83,25 @@ __global__ void applySpringForces(ClothNode* nodes, Spring* springs, int numSpri
 
     float3 dir = xj - xi;
     float dist = length(dir);
-    if (dist < 1e-6f) return;  // Avoid division by zero
+    if (dist < 1e-6f) return;
 
-    float3 n = dir / dist;  // Unit vector from i to j
+    float3 n = dir / dist;
 
-    // Spring force: F = -k * (current_length - rest_length) * direction
-    // This force acts on node j (in direction n)
-    float3 f_spring = -ks * (dist - L0) * n;
+    float ks_local = 0.0f;
+    switch (spring.type) {
+        case 0: ks_local = ks_structural; break;
+        case 1: ks_local = ks_shear; break;
+        case 2: ks_local = ks_bend; break;
+    }
 
-    // Damping force: F_damp = -kd * (relative_velocity · direction) * direction
+    float3 f_spring = -ks_local * ((dist - L0) / L0) * n;
+
     float3 v_rel = vj - vi;
     float v_along_spring = dot(v_rel, n);
     float3 f_damp = -kd * v_along_spring * n;
 
     float3 f_total = f_spring + f_damp;
 
-    // FIXED: Correct force application
-    // f_total is the force that should be applied to node j
-    // Newton's 3rd law: equal and opposite force on node i
     if (!nodes[i].pinned) {
         atomicAdd(&nodes[i].force.x, -f_total.x);
         atomicAdd(&nodes[i].force.y, -f_total.y);
