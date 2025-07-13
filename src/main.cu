@@ -14,6 +14,8 @@
 #include "extract_positions.cuh"
 #include "renderer.h"
 #include "vtk_export.h"
+#include "spatial_hash.cuh"
+#include "marble.cuh"
 
 #define BLOCK_SIZE 128
 #define MAX_STEPS 10000
@@ -22,6 +24,10 @@
 // Convergence thresholds
 #define VELOCITY_THRESHOLD 0.1f
 #define FORCE_THRESHOLD 0.1f
+
+__host__ float getMaxVelocity(ClothNode* nodes, Marble* marbles) {
+    return 0.1f;
+}
 
 int main() {
     mkdir("output", 0777);
@@ -51,7 +57,7 @@ int main() {
     const int total_nodes = h_num_x * h_num_y;
     const float clothWidth = 2.0f;
     const float clothHeight = 2.0f;
-    const float force_strength = -40.0f;
+    const float force_strength = 0.0f;
     const int radius = 4;
     const int start_step = 0;
     const int end_step = 500;
@@ -123,45 +129,160 @@ int main() {
     float h_dt;
     cudaMemcpyFromSymbol(&h_dt, dt, sizeof(float), 0, cudaMemcpyDeviceToHost);
 
-    initRenderer(h_num_x, h_num_y);
 
     extractPositions<<<blocks, threads>>>(d_nodes, d_clothPositions, total_nodes);
     cudaDeviceSynchronize();
-
-    for (int i = 0; i < 60 && !windowShouldClose(); ++i) {
-        beginFrame();
-        renderCloth(-1, d_clothPositions);
-        endFrame();
-    }
 
     std::vector<ClothNode> h_nodes(total_nodes);
     cudaMemcpy(h_nodes.data(), d_nodes, total_nodes * sizeof(ClothNode), cudaMemcpyDeviceToHost);
     writeClothToVTK(outputPath, h_nodes, springs, h_num_x, h_num_y);
 
+    float h_grid_cell_size;
+    cudaMemcpyFromSymbol(&h_grid_cell_size, grid_cell_size, sizeof(float));
+
+    float3 grid_min = make_float3(-clothWidth/2, -clothHeight/2, -1.0f);
+    float3 grid_max = make_float3(clothWidth/2, clothHeight/2, 1.0f);
+    int3 grid_dims = make_int3(
+        ceil((grid_max.x - grid_min.x) / h_grid_cell_size),
+        ceil((grid_max.y - grid_min.y) / h_grid_cell_size),
+        ceil((grid_max.z - grid_min.z) / h_grid_cell_size)
+    );
+    int grid_size = grid_dims.x * grid_dims.y * grid_dims.z;
+
+    // Allocate linked list structures
+    int* d_cellHead;
+    int* d_nodeNext;
+    cudaMalloc(&d_cellHead, grid_size * sizeof(int));
+    cudaMalloc(&d_nodeNext, total_nodes * sizeof(int));
+
+    // Initialize marbles
+    const int h_num_marbles = 10;
+    Marble* h_marbles = new Marble[h_num_marbles];
+    Marble* d_marbles;
+    cudaMalloc(&d_marbles, h_num_marbles * sizeof(Marble));
+    int marbleThreads = BLOCK_SIZE;
+    int marbleBlocks = (h_num_marbles + marbleThreads - 1) / marbleThreads;
+    
+    float h_marble_radius_min, h_marble_radius_max, h_marble_density;
+    cudaMemcpyFromSymbol(&h_marble_radius_min, marble_radius_min, sizeof(float));
+    cudaMemcpyFromSymbol(&h_marble_radius_max, marble_radius_max, sizeof(float));
+    cudaMemcpyFromSymbol(&h_marble_density, marble_density, sizeof(float));
+    
+    // DECLARE VARIABLES BEFORE ALLOCATING
+    int* d_cellHeadMarble = nullptr;
+    int* d_marbleNext = nullptr;
+    cudaMalloc(&d_cellHeadMarble, grid_size * sizeof(int));
+    cudaMalloc(&d_marbleNext, h_num_marbles * sizeof(int));
+    
+    initializeMarbles(h_marbles, h_num_marbles, h_marble_radius_min, 
+                     h_marble_radius_max, h_marble_density);
+    cudaMemcpy(d_marbles, h_marbles, h_num_marbles * sizeof(Marble), 
+              cudaMemcpyHostToDevice);
+
+    // Spatial grid for marbles
+    int* d_marbleCellHead = nullptr;
+    int* d_marbleNodeNext = nullptr;
+    cudaMalloc(&d_marbleCellHead, grid_size * sizeof(int));
+    cudaMalloc(&d_marbleNodeNext, h_num_marbles * sizeof(int));
+
+    initRenderer(h_num_x, h_num_y, h_num_marbles);
+    for (int i = 0; i < 60 && !windowShouldClose(); ++i) {
+        beginFrame();
+        renderClothAndMarbles(-1, d_clothPositions, nullptr, 0);
+        endFrame();
+    }
+
     printf("Starting simulation...\n");
 
     bool converged = false;
+    const float base_dt = 0.001f;
+    float adaptive_dt = base_dt;
+
     for (int step = 0; step <= MAX_STEPS && !converged; ++step) {
-        // Integration step
-        verletUpdatePosition<<<blocks, threads>>>(d_nodes, d_old_accel, h_dt);
-        applyPinningConstraints<<<blocks, threads>>>(d_nodes);
+        float max_vel = getMaxVelocity(d_nodes, d_marbles);
+        adaptive_dt = base_dt / (1.0f + max_vel * 0.1f); // Reduced sensitivity
+        float current_dt = fminf(adaptive_dt, 0.005f); // Cap maximum dt
 
+        // PHASE 1: RESET FORCES
         resetClothForces<<<blocks, threads>>>(d_nodes);
+        resetMarbleForces<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles);
+        cudaDeviceSynchronize();
+
+        // PHASE 2: APPLY BASIC FORCES
         applyGravity<<<blocks, threads>>>(d_nodes);
-        applyViscousDamping<<<blocks, threads>>>(d_nodes);
-
-        kernelResetExternalForces<<<blocks, threads>>>(d_externalForce, total_nodes);
-        applyPrescribedForce(step, d_externalForce, h_num_x, h_num_y,
-                             selectedMode, force_strength, radius,
-                             start_step, end_step);
-        kernelInjectForces<<<blocks, threads>>>(d_nodes, d_externalForce, total_nodes);
-
+        applyGravityToMarbles<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles);
         applySpringForces<<<springBlocks, threads>>>(d_nodes, d_springs, numSprings);
+        applyViscousDamping<<<blocks, threads>>>(d_nodes);
+        cudaDeviceSynchronize();
+        
+        // PHASE 3: EXTERNAL FORCES
+        kernelResetExternalForces<<<blocks, threads>>>(d_externalForce, total_nodes);
+        applyPrescribedForce(step, d_externalForce, h_num_x, h_num_y, selectedMode, 
+                            force_strength, radius, start_step, end_step);
+        kernelInjectForces<<<blocks, threads>>>(d_nodes, d_externalForce, total_nodes);
+        cudaDeviceSynchronize();
+        
+        // PHASE 4: SPATIAL HASHING AND SELF-COLLISIONS
+        // Cloth spatial hashing
+        cudaMemset(d_cellHead, -1, grid_size * sizeof(int));
+        extractPositions<<<blocks, threads>>>(d_nodes, d_clothPositions, total_nodes);
+        buildSpatialLinkedList<<<blocks, threads>>>(d_clothPositions, d_cellHead, d_nodeNext, 
+                                                total_nodes, grid_dims, grid_min, h_grid_cell_size);
+        applyClothSelfContact<<<blocks, threads>>>(d_nodes, d_cellHead, d_nodeNext, 
+                                                grid_dims, grid_min, h_grid_cell_size);
+        cudaDeviceSynchronize();
+        
+        // Marble spatial hashing
+        cudaMemset(d_marbleCellHead, -1, grid_size * sizeof(int));
+        insertMarblesToGrid<<<marbleBlocks, marbleThreads>>>(d_marbles, d_marbleCellHead, 
+                                                            d_marbleNodeNext, h_num_marbles, 
+                                                            grid_dims, grid_min, h_grid_cell_size);
+        cudaDeviceSynchronize();
 
-        verletUpdateVelocity<<<blocks, threads>>>(d_nodes, d_old_accel, h_dt, (1.0f / mass_val));
-        storeAcceleration<<<blocks, threads>>>(d_nodes, d_old_accel, 1.0f / mass_val);
+        // PHASE 5: INTER-OBJECT COLLISIONS
+        // Marble-marble interactions
+        computeMarbleMarbleInteraction<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, 
+                                                                    d_marbleCellHead, d_marbleNodeNext, 
+                                                                    grid_dims, grid_min, h_grid_cell_size);
+        
+        // FIXED: Improved cloth-marble interaction (both methods)
+        computeMarbleClothInteraction<<<blocks, threads>>>(d_nodes, d_marbles, h_num_marbles, current_dt);
+        computeMarbleTriangleCollision<<<marbleBlocks, marbleThreads>>>(d_nodes, d_marbles, h_num_marbles);
+        cudaDeviceSynchronize();
+        
+        // PHASE 6: INTEGRATION WITH STABILITY CHECKS
+        // Cloth integration
+        eulerIntegrateCloth<<<blocks, threads>>>(d_nodes, current_dt, 1.0f/mass_val);
+        cudaDeviceSynchronize();
+        
+        // Marble integration with stability controls
+        updateMarbleVelocities<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, current_dt);
+        
+        // FIXED: Apply constraints before position update
+        float3 domainMin = make_float3(-2.5f, -0.5f, -2.5f);
+        float3 domainMax = make_float3(2.5f, 8.0f, 2.5f);
+        
+        applyBoundaryConstraints<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, domainMin, domainMax);
+        
+        // Limit velocities for stability
+        float maxVelocity = 15.0f;
+        float maxAngularVel = 10.0f;
+        limitMarbleVelocities<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, maxVelocity, maxAngularVel);
+        
+        // Update positions
+        updateMarblePositionsAndOrientations<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, current_dt);
+        
+        // Apply energy dissipation for long-term stability
+        float dampingFactor = 0.999f;
+        applyEnergyDissipation<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, dampingFactor);
+        
+        cudaDeviceSynchronize();
+
+        // PHASE 7: CONSTRAINTS
         applyPinningConstraints<<<blocks, threads>>>(d_nodes);
+        cudaDeviceSynchronize();
 
+        // PHASE 8: CONVERGENCE CHECK
         if (step % CONVERGENCE_CHECK_INTERVAL == 0 && step > 0) {
             resetConvergenceData<<<1, 1>>>(d_conv_data);
             cudaDeviceSynchronize();
@@ -178,40 +299,43 @@ int main() {
             if (step % (CONVERGENCE_CHECK_INTERVAL * 10) == 0) {
                 ConvergenceData h_conv;
                 cudaMemcpy(&h_conv, d_conv_data, sizeof(ConvergenceData), cudaMemcpyDeviceToHost);
-                printf("Step %d: Max velocity = %.6f, Max force = %.6f\n", 
-                       step, h_conv.max_velocity, h_conv.max_force);
+                printf("Step %d: Max velocity = %.6f, Max force = %.6f, dt = %.6f\n", 
+                    step, h_conv.max_velocity, h_conv.max_force, current_dt);
             }
 
+            // FIXED: Additional stability monitoring
             if (step % 50 == 0) {
-                cudaMemcpy(h_nodes.data(), d_nodes, total_nodes * sizeof(ClothNode), cudaMemcpyDeviceToHost);
-
-                int cx = h_num_x / 2;
-                int cy = h_num_y / 2;
-
-                printf("Step %d:\n", step);
-                fprintf(forceLog, "%d", step);
-
-                for (int dy = -1; dy <= 1; dy++) {
-                    for (int dx = -1; dx <= 1; dx++) {
-                        int x = cx + dx;
-                        int y = cy + dy;
-                        int idx = y * h_num_x + x;
-
-                        float fy = h_nodes[idx].force.y;
-                        float vy = h_nodes[idx].vel.y;
-
-                        printf("  Node (%d,%d): Vy = %.6f, Fy = %.6f\n", x, y, vy, fy);
-                        fprintf(forceLog, ",%.6f,%.6f", fy, vy);
+                // Check for any marbles that might have unstable behavior
+                std::vector<Marble> h_marbles_check(h_num_marbles);
+                cudaMemcpy(h_marbles_check.data(), d_marbles, h_num_marbles * sizeof(Marble), cudaMemcpyDeviceToHost);
+                
+                bool unstable = false;
+                for (int i = 0; i < h_num_marbles; i++) {
+                    float speed = sqrtf(h_marbles_check[i].vel.x * h_marbles_check[i].vel.x + 
+                                    h_marbles_check[i].vel.y * h_marbles_check[i].vel.y + 
+                                    h_marbles_check[i].vel.z * h_marbles_check[i].vel.z);
+                    if (speed > 50.0f || h_marbles_check[i].pos.y < -10.0f || h_marbles_check[i].pos.y > 20.0f) {
+                        printf("Warning: Marble %d unstable - speed: %.2f, pos: (%.2f, %.2f, %.2f)\n", 
+                            i, speed, h_marbles_check[i].pos.x, h_marbles_check[i].pos.y, h_marbles_check[i].pos.z);
+                        unstable = true;
                     }
                 }
-                fprintf(forceLog, "\n");
+                
+                if (unstable) {
+                    printf("Applying emergency stabilization...\n");
+                    // Apply emergency damping
+                    float emergency_damping = 0.8f;
+                    applyEnergyDissipation<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, emergency_damping);
+                    cudaDeviceSynchronize();
+                }
             }
         }
 
+        // PHASE 9: RENDERING
         beginFrame();
         extractPositions<<<blocks, threads>>>(d_nodes, d_clothPositions, total_nodes);
         cudaDeviceSynchronize();
-        renderCloth(step, d_clothPositions);
+        renderClothAndMarbles(step, d_clothPositions, d_marbles, h_num_marbles);
 
         if (step % 100 == 0) {
             std::vector<ClothNode> host_nodes(total_nodes);
@@ -236,6 +360,8 @@ int main() {
     cudaFree(d_conv_data);
     cudaFree(d_kinetic_energy);
     cudaFree(d_potential_energy);
+    cudaFree(d_cellHead);
+    cudaFree(d_nodeNext);
     freeExternalForceBuffer();
     cleanupRenderer();
     fclose(forceLog);

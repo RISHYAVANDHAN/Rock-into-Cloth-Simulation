@@ -45,6 +45,8 @@ set(SRC_FILES
     ${SRC_DIR}/extract_positions.cu
     ${SRC_DIR}/renderer.cpp
     ${SRC_DIR}/vtk_export.cpp
+    ${SRC_DIR}/spatial_hash.cu
+    ${SRC_DIR}/marble.cu
     ${IMGUI_SRC}
 )
 

@@ -1,5 +1,6 @@
 #include "integrator.cuh"
 #include "params.cuh"
+#include "float3_utils.cuh"
 
 __global__ void verletUpdatePosition(ClothNode* nodes, float3* old_accel, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -29,19 +30,13 @@ __global__ void storeAcceleration(ClothNode* nodes, float3* accel_out, float inv
     }
 }
 
-// DEM-based marble–cloth contact (1 sphere version)
-__global__ void applyMarbleCollision(ClothNode* nodes, float3 center, float radius, float kn, float kd) {
+__global__ void eulerIntegrateCloth(ClothNode* nodes, float dt, float inv_mass) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_x * num_y;
-    if (i >= total || nodes[i].pinned) return;
-
-    float3 dir = nodes[i].pos - center;
-    float dist = length(dir);
-    if (dist < radius) {
-        float3 normal = normalize(dir);
-        float3 vrel = nodes[i].vel;
-        float vrel_n = dot(vrel, normal);
-        float3 f_contact = kn * (radius - dist) * normal - kd * vrel_n * normal;
-        nodes[i].force += f_contact;
+    if (i < total && !nodes[i].pinned) {
+        // Semi-implicit Euler integration
+        float3 acceleration = nodes[i].force * inv_mass;
+        nodes[i].vel += acceleration * dt;
+        nodes[i].pos += nodes[i].vel * dt;
     }
 }

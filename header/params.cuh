@@ -26,6 +26,27 @@ extern float host_dx;
 extern float host_dy;
 extern float host_node_mass;
 
+extern __constant__ float contact_radius;
+extern __constant__ float kn_contact;
+extern __constant__ float kd_contact;
+extern __constant__ float friction_mu;
+extern __constant__ float grid_cell_size;
+
+extern __constant__ float kn_marble;
+extern __constant__ float kd_marble;
+extern __constant__ float friction_mu_marble;
+
+extern __constant__ int num_marbles;
+extern __constant__ float marble_radius_min;
+extern __constant__ float marble_radius_max;
+extern __constant__ float marble_density;
+extern __constant__ float kn_marble_marble;
+extern __constant__ float kd_marble_marble;
+extern __constant__ float friction_mu_marble_marble;
+
+extern __constant__ float3 domain_min;
+extern __constant__ float3 domain_max;
+
 void uploadSimParamsToDevice(int Nx, int Ny, float width, float height);
 
 #endif

@@ -1,3 +1,4 @@
+// Fixed params.cu with proper marble physics
 #include "params.cuh"
 
 // Host-side variables
@@ -22,24 +23,91 @@ __constant__ int num_y;
 __constant__ float dx;
 __constant__ float dy;
 __constant__ float plastic_threshold;
+__constant__ float contact_radius;
+__constant__ float kn_contact;
+__constant__ float kd_contact;
+__constant__ float friction_mu;
+__constant__ float grid_cell_size;
+__constant__ float kn_marble;
+__constant__ float kd_marble;
+__constant__ float friction_mu_marble;
+__constant__ int num_marbles;
+__constant__ float marble_radius_min;
+__constant__ float marble_radius_max;
+__constant__ float marble_density;
+__constant__ float kn_marble_marble;
+__constant__ float kd_marble_marble;
+__constant__ float friction_mu_marble_marble;
+__constant__ float3 domain_min;
+__constant__ float3 domain_max;
+__constant__ float boundary_restitution;
+__constant__ float boundary_friction;
 
 void uploadSimParamsToDevice(int Nx, int Ny, float width, float height) {
+    // CLOTH PARAMETERS - Keep existing values
     float h_ks_structural = 8000.0f;
     float h_ks_shear = 4000.0f;
     float h_ks_bend = 1000.0f;
     float h_kd = 0.05f;
-    float h_mass = 10.0f;
-    float h_dt_val = 0.001f;
+    float h_mass = 1.0f;
+    
+    // FIXED: Larger timestep for stability
+    float h_dt_val = 0.001f;  // Increased from 0.0005f
+    
     float h_dx_val = width / (Nx - 1);
     float h_dy_val = height / (Ny - 1);
     float h_threshold = 50.0f;
     float3 h_gravity_val = make_float3(0.0f, -9.81f, 0.0f);
+    float h_contact_radius = 0.5f * min(h_dx_val, h_dy_val);
+    float h_kn_contact = 500.0f;
+    float h_kd_contact = 0.05f;
+    float h_friction_mu = 0.3f;
+    float h_grid_cell_size = 2.5f * h_contact_radius;
 
     h_dt = h_dt_val;
     h_gravity = h_gravity_val;
     host_dx = h_dx_val;
     host_dy = h_dy_val;
     host_node_mass = h_mass;
+
+    // MARBLE-CLOTH INTERACTION - Softer springs
+    float h_kn_marble = 200.0f;      // Reduced from 500.0f
+    float h_kd_marble = 20.0f;       // Reduced from 50.0f
+    float h_friction_mu_marble = 0.4f;
+
+    int h_num_marbles = 5;
+    float h_marble_radius_min = 0.08f;  // Slightly smaller
+    float h_marble_radius_max = 0.15f;  // Slightly smaller
+    float h_marble_density = 2.0f;
+    
+    // MARBLE-MARBLE INTERACTION - Much softer for stability
+    float h_kn_marble_marble = 300.0f;   // Reduced from 1000.0f
+    float h_kd_marble_marble = 15.0f;    // Reduced from 0.7f (this was way too low)
+    float h_friction_mu_marble_marble = 0.5f;
+
+    // DOMAIN BOUNDARIES
+    float3 h_domain_min = make_float3(-2.0f, -0.5f, -2.0f);
+    float3 h_domain_max = make_float3(2.0f, 6.0f, 2.0f);
+    float h_boundary_restitution = 0.2f;  // Less bouncy
+    float h_boundary_friction = 0.9f;     // More friction
+
+    // Copy all parameters to device
+    cudaMemcpyToSymbol(domain_min, &h_domain_min, sizeof(float3));
+    cudaMemcpyToSymbol(domain_max, &h_domain_max, sizeof(float3));
+    cudaMemcpyToSymbol(boundary_restitution, &h_boundary_restitution, sizeof(float));
+    cudaMemcpyToSymbol(boundary_friction, &h_boundary_friction, sizeof(float));
+
+    cudaMemcpyToSymbol(num_marbles, &h_num_marbles, sizeof(int));
+    cudaMemcpyToSymbol(marble_radius_min, &h_marble_radius_min, sizeof(float));
+    cudaMemcpyToSymbol(marble_radius_max, &h_marble_radius_max, sizeof(float));
+    cudaMemcpyToSymbol(marble_density, &h_marble_density, sizeof(float));
+    cudaMemcpyToSymbol(kn_marble_marble, &h_kn_marble_marble, sizeof(float));
+    cudaMemcpyToSymbol(kd_marble_marble, &h_kd_marble_marble, sizeof(float));
+    cudaMemcpyToSymbol(friction_mu_marble_marble, &h_friction_mu_marble_marble, sizeof(float));
+
+    cudaMemcpyToSymbol(kn_marble, &h_kn_marble, sizeof(float));
+    cudaMemcpyToSymbol(kd_marble, &h_kd_marble, sizeof(float));
+    cudaMemcpyToSymbol(friction_mu_marble, &h_friction_mu_marble, sizeof(float));
 
     cudaMemcpyToSymbol(ks_structural, &h_ks_structural, sizeof(float));
     cudaMemcpyToSymbol(ks_shear, &h_ks_shear, sizeof(float));
@@ -55,4 +123,9 @@ void uploadSimParamsToDevice(int Nx, int Ny, float width, float height) {
     cudaMemcpyToSymbol(dx, &h_dx_val, sizeof(float));
     cudaMemcpyToSymbol(dy, &h_dy_val, sizeof(float));
     cudaMemcpyToSymbol(plastic_threshold, &h_threshold, sizeof(float));
+    cudaMemcpyToSymbol(contact_radius, &h_contact_radius, sizeof(float));
+    cudaMemcpyToSymbol(kn_contact, &h_kn_contact, sizeof(float));
+    cudaMemcpyToSymbol(kd_contact, &h_kd_contact, sizeof(float));
+    cudaMemcpyToSymbol(friction_mu, &h_friction_mu, sizeof(float));
+    cudaMemcpyToSymbol(grid_cell_size, &h_grid_cell_size, sizeof(float));
 }

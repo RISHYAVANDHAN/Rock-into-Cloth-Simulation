@@ -66,6 +66,20 @@ __host__ __device__ inline float3& operator*=(float3& a, const float3& b) {
     return a;
 }
 
+__host__ __device__ inline float3& operator*=(float3& a, const float s) {
+    a.x *= s;
+    a.y *= s;
+    a.z *= s;
+    return a;
+}
+
+__host__ __device__ inline float3& operator/=(float3& a, const float s) {
+    a.x /= s;
+    a.y /= s;
+    a.z /= s;
+    return a;
+}
+
 __host__ __device__ inline float3& operator/=(float3& a, const float3& b) {
     a.x /= b.x;
     a.y /= b.y;
