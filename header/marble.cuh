@@ -1,19 +1,9 @@
 #ifndef MARBLE_CUH
 #define MARBLE_CUH
 
-#include "float3_utils.cuh"
+#pragma once
 
-struct Marble {
-    float3 pos;
-    float3 vel;
-    float3 force;
-    float3 angular_vel;
-    float3 torque;
-    float4 orientation; // Quaternion (x,y,z,w)
-    float radius;
-    float mass;
-    float inertia; // I = (2/5)*mass*radius²
-};
+#include "float3_utils.cuh"
 
 void initializeMarbles(Marble* marbles, int numMarbles, float min_radius, float max_radius, float density);
 
@@ -34,5 +24,11 @@ __global__ void applyBoundaryConstraints(Marble* marbles, int numMarbles, float3
 __global__ void limitMarbleVelocities(Marble* marbles, int numMarbles, float maxVel, float maxAngVel);
 
 __global__ void applyEnergyDissipation(Marble* marbles, int numMarbles, float dampingFactor);
+
+__global__ void storeMarblePreviousPositions(Marble* marbles, int numMarbles);
+
+__global__ void limitMarbleVelocities(Marble* marbles, int numMarbles, float maxVel, float maxAngVel);
+
+__global__ void continuousMarbleClothCollision(Marble* marbles, int numMarbles, ClothNode* nodes, const int* cellHead, const int* nodeNext, int3 gridSize, float3 gridMin, float cellSize, float dt);
 
 #endif

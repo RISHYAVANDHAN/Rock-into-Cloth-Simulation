@@ -17,6 +17,27 @@ __global__ void extractMarblePositions(Marble* marbles, float3* positions, int n
     }
 }
 
+__global__ void storeMarblePreviousPositions(Marble* marbles, int numMarbles) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numMarbles) return;
+    marbles[i].prevPos = marbles[i].pos;
+}
+
+__global__ void limitMarbleVelocities(Marble* marbles, int numMarbles, float maxVel, float maxAngVel) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numMarbles) return;
+    
+    float speed = length(marbles[i].vel);
+    if (speed > maxVel) {
+        marbles[i].vel = (maxVel / speed) * marbles[i].vel;
+    }
+    
+    float angSpeed = length(marbles[i].angular_vel);
+    if (angSpeed > maxAngVel) {
+        marbles[i].angular_vel = (maxAngVel / angSpeed) * marbles[i].angular_vel;
+    }
+}
+
 void initializeMarbles(Marble* marbles, int numMarbles, float min_radius, float max_radius, float density) {
     srand(42);
     
@@ -26,21 +47,21 @@ void initializeMarbles(Marble* marbles, int numMarbles, float min_radius, float 
         marbles[i].mass = (4.0f/3.0f) * M_PI * radius*radius*radius * density;
         marbles[i].inertia = 0.4f * marbles[i].mass * radius*radius;
         
-        // FIXED: Better spatial distribution
-        float spawn_radius = 0.5f; // Smaller spawn area
+        float spawn_radius = 0.5f;
         float angle = (2.0f * M_PI * i) / numMarbles;
         float spawn_distance = spawn_radius * sqrtf(rand() / (float)RAND_MAX);
         
         marbles[i].pos = make_float3(
             spawn_distance * cosf(angle),
-            4.0f + radius + i * 0.5f, // Higher drop with staggered heights
+            4.0f + radius + i * 0.5f,
             spawn_distance * sinf(angle)
         );
         
-        // FIXED: Slower, more controlled initial velocity
+        marbles[i].prevPos = marbles[i].pos; // Initialize previous position
+        
         marbles[i].vel = make_float3(
             0.1f * (rand()/(float)RAND_MAX - 0.5f),
-            -1.0f - i * 0.2f,  // Slower drop with staggering
+            -1.0f - i * 0.2f,
             0.1f * (rand()/(float)RAND_MAX - 0.5f)
         );
         
@@ -72,7 +93,7 @@ __global__ void updateMarbleVelocities(Marble* marbles, int numMarbles, float dt
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numMarbles) return;
     
-    // FIXED: Add velocity limiting during integration
+    // Add velocity limiting during integration
     float3 acceleration = marbles[idx].force / marbles[idx].mass;
     float3 angular_acceleration = marbles[idx].torque / marbles[idx].inertia;
     
@@ -117,7 +138,6 @@ __global__ void updateMarblePositionsAndOrientations(Marble* marbles, int numMar
     }
 }
 
-// FIXED: Improved marble-marble collision with better separation
 __global__ void computeMarbleMarbleInteraction(
     Marble* marbles, int numMarbles,
     int* cellHead, int* nodeNext,
@@ -133,75 +153,67 @@ __global__ void computeMarbleMarbleInteraction(
         floorf((pos_i.z - gridMin.z) / cellSize)
     );
 
-    for (int z = max(0, cell_coord.z-1); z <= min(gridSize.z-1, cell_coord.z+1); z++) {
-        for (int y = max(0, cell_coord.y-1); y <= min(gridSize.y-1, cell_coord.y+1); y++) {
-            for (int x = max(0, cell_coord.x-1); x <= min(gridSize.x-1, cell_coord.x+1); x++) {
-                int3 neighbor_cell = make_int3(x, y, z);
-                int hash = computeHash(neighbor_cell, gridSize);
-                
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int3 neighbor_cell = make_int3(
+                    cell_coord.x + dx,
+                    cell_coord.y + dy,
+                    cell_coord.z + dz
+                );
+
+                if (neighbor_cell.x < 0 || neighbor_cell.x >= gridSize.x ||
+                    neighbor_cell.y < 0 || neighbor_cell.y >= gridSize.y ||
+                    neighbor_cell.z < 0 || neighbor_cell.z >= gridSize.z)
+                    continue;
+
+                int hash = calcHash(neighbor_cell, gridSize);
                 int j = cellHead[hash];
+
                 while (j != -1) {
                     if (j > i) {
-                        Marble* marble_j = &marbles[j];
-                        float3 delta = marble_j->pos - pos_i;
+                        Marble* mj = &marbles[j];
+                        float3 delta = mj->pos - pos_i;
                         float dist = length(delta);
-                        float contact_dist = marbles[i].radius + marble_j->radius;
-                        
-                        if (dist < contact_dist && dist > 1e-6f) {
+
+                        float min_sep = (marbles[i].radius + mj->radius) * 1.05f;
+                        if (dist < min_sep && dist > 1e-6f) {
                             float3 normal = delta / dist;
-                            float penetration = contact_dist - dist;
-                            
-                            // FIXED: Better contact point calculation
-                            float3 contact_point = pos_i + normal * marbles[i].radius;
-                            float3 r_i = contact_point - pos_i;
-                            float3 r_j = contact_point - marble_j->pos;
-                            
-                            // Contact velocities
-                            float3 v_i_contact = marbles[i].vel + cross(marbles[i].angular_vel, r_i);
-                            float3 v_j_contact = marble_j->vel + cross(marble_j->angular_vel, r_j);
-                            float3 v_rel = v_j_contact - v_i_contact;
+                            float overlap = min_sep - dist;
+
+                            float3 contact_pt = pos_i + normal * marbles[i].radius;
+                            float3 r_i = contact_pt - pos_i;
+                            float3 r_j = contact_pt - mj->pos;
+
+                            float3 v_i = marbles[i].vel + cross(marbles[i].angular_vel, r_i);
+                            float3 v_j = mj->vel + cross(mj->angular_vel, r_j);
+                            float3 v_rel = v_j - v_i;
                             float vn = dot(v_rel, normal);
-                            
-                            // FIXED: Proper damping calculation
-                            float reduced_mass = (marbles[i].mass * marble_j->mass) / 
-                                                (marbles[i].mass + marble_j->mass);
-                            float damping = 2.0f * sqrtf(reduced_mass * kn_marble_marble) * 0.1f;
-                            
-                            // Forces
-                            float3 Fn = kn_marble_marble * penetration * normal - damping * vn * normal;
-                            
-                            // Friction
-                            float3 v_tangent = v_rel - vn * normal;
-                            float vt_mag = length(v_tangent);
-                            float3 Ft = make_float3(0,0,0);
-                            
-                            if (vt_mag > 1e-6f) {
-                                float3 tangent = v_tangent / vt_mag;
-                                float max_ft = friction_mu_marble_marble * length(Fn);
-                                Ft = -fminf(max_ft, damping * vt_mag) * tangent;
+
+                            float repulsion = kn_marble_marble * overlap;
+                            if (overlap > 0.02f * min_sep) {
+                                float k = overlap / min_sep;
+                                repulsion *= (1.0f + 4.0f * k);
                             }
-                            
-                            float3 F_total = Fn + Ft;
-                            
-                            // Apply forces
-                            atomicAdd(&marbles[i].force.x, -F_total.x);
-                            atomicAdd(&marbles[i].force.y, -F_total.y);
-                            atomicAdd(&marbles[i].force.z, -F_total.z);
-                            
-                            atomicAdd(&marble_j->force.x, F_total.x);
-                            atomicAdd(&marble_j->force.y, F_total.y);
-                            atomicAdd(&marble_j->force.z, F_total.z);
-                            
-                            // Apply torques
-                            float3 tau_i = cross(r_i, -F_total);
+
+                            float3 Fn = repulsion * normal - kd_marble * vn * normal;
+
+                            atomicAdd(&marbles[i].force.x, -Fn.x);
+                            atomicAdd(&marbles[i].force.y, -Fn.y);
+                            atomicAdd(&marbles[i].force.z, -Fn.z);
+
+                            atomicAdd(&mj->force.x, Fn.x);
+                            atomicAdd(&mj->force.y, Fn.y);
+                            atomicAdd(&mj->force.z, Fn.z);
+
+                            float3 tau_i = cross(r_i, -Fn);
+                            float3 tau_j = cross(r_j, Fn);
                             atomicAdd(&marbles[i].torque.x, tau_i.x);
                             atomicAdd(&marbles[i].torque.y, tau_i.y);
                             atomicAdd(&marbles[i].torque.z, tau_i.z);
-                            
-                            float3 tau_j = cross(r_j, F_total);
-                            atomicAdd(&marble_j->torque.x, tau_j.x);
-                            atomicAdd(&marble_j->torque.y, tau_j.y);
-                            atomicAdd(&marble_j->torque.z, tau_j.z);
+                            atomicAdd(&mj->torque.x, tau_j.x);
+                            atomicAdd(&mj->torque.y, tau_j.y);
+                            atomicAdd(&mj->torque.z, tau_j.z);
                         }
                     }
                     j = nodeNext[j];
@@ -219,7 +231,7 @@ __global__ void applyBoundaryConstraints(Marble* marbles, int numMarbles, float3
     float restitution = 0.1f;  // Very low bounce
     float friction = 0.95f;    // High friction
     
-    // FIXED: Better floor collision with position correction
+    // Better floor collision with position correction
     if (marble->pos.y - marble->radius < domainMin.y) {
         marble->pos.y = domainMin.y + marble->radius + 0.001f; // Small buffer
         if (marble->vel.y < 0) {
@@ -284,30 +296,11 @@ __global__ void applyBoundaryConstraints(Marble* marbles, int numMarbles, float3
     }
 }
 
-__global__ void limitMarbleVelocities(Marble* marbles, int numMarbles, float maxVel, float maxAngVel) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numMarbles) return;
-    
-    // FIXED: More aggressive velocity limiting
-    float max_linear_vel = 15.0f;  // Reduced from maxVel
-    float max_angular_vel = 10.0f;  // Reduced from maxAngVel
-    
-    float speed = length(marbles[i].vel);
-    if (speed > max_linear_vel) {
-        marbles[i].vel = (max_linear_vel / speed) * marbles[i].vel;
-    }
-    
-    float angSpeed = length(marbles[i].angular_vel);
-    if (angSpeed > max_angular_vel) {
-        marbles[i].angular_vel = (max_angular_vel / angSpeed) * marbles[i].angular_vel;
-    }
-}
-
 __global__ void applyEnergyDissipation(Marble* marbles, int numMarbles, float dampingFactor) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numMarbles) return;
     
-    // FIXED: Adaptive damping based on velocity
+    // Adaptive damping based on velocity
     float linear_damping = 0.998f;
     float angular_damping = 0.995f;
     

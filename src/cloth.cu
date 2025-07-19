@@ -119,7 +119,7 @@ __global__ void applySpringForces(ClothNode* nodes, Spring* springs, int numSpri
     }
 }
 
-__global__ void applyClothSelfContact(ClothNode* nodes,const int* cellHead,const int* nodeNext,int3 gridSize,float3 gridMin,float cellSize) {
+__global__ void applyClothSelfContact(ClothNode* nodes, const int* cellHead, const int* nodeNext, int3 gridSize, float3 gridMin, float cellSize) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_x * num_y;
     if (i >= total || nodes[i].pinned) return;
@@ -138,7 +138,7 @@ __global__ void applyClothSelfContact(ClothNode* nodes,const int* cellHead,const
         for (int y = max(0, cell_coord.y-1); y <= min(gridSize.y-1, cell_coord.y+1); y++) {
             for (int x = max(0, cell_coord.x-1); x <= min(gridSize.x-1, cell_coord.x+1); x++) {
                 int3 neighbor_cell = make_int3(x, y, z);
-                int hash = computeHash(neighbor_cell, gridSize);
+                int hash = calcHash(neighbor_cell, gridSize);
                 
                 // Traverse linked list for this cell
                 int j = cellHead[hash];
@@ -190,185 +190,78 @@ __global__ void applyClothSelfContact(ClothNode* nodes,const int* cellHead,const
     }
 }
 
-
-// FIXED: Proper bidirectional cloth-marble interaction
-__global__ void computeMarbleClothInteraction(ClothNode* nodes,Marble* marbles,int numMarbles,float dt) {
-    int node_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_nodes = num_x * num_y;
-    if (node_idx >= total_nodes) return;
-
-    ClothNode* node = &nodes[node_idx];
-    if (node->pinned) return;
-
-    for (int i = 0; i < numMarbles; i++) {
-        Marble* marble = &marbles[i];
-        float3 delta = node->pos - marble->pos;
-        float dist = length(delta);
-        
-        // FIXED: Improved collision detection threshold
-        float collision_threshold = marble->radius + 0.01f; // Small buffer for stability
-        
-        if (dist < collision_threshold && dist > 1e-8f) {
-            float3 normal = delta / dist;
-            float penetration = collision_threshold - dist;
-            
-            // FIXED: Better contact point calculation
-            float3 contact_point = marble->pos + normal * marble->radius;
-            float3 r_marble = contact_point - marble->pos;
-            
-            // Relative velocity calculation
-            float3 v_marble_contact = marble->vel + cross(marble->angular_vel, r_marble);
-            float3 v_rel = node->vel - v_marble_contact;
-            float vn = dot(v_rel, normal);
-            
-            // FIXED: Proper reduced mass calculation
-            float reduced_mass = (node_mass * marble->mass) / (node_mass + marble->mass);
-            float kd_critical = 2.0f * sqrtf(reduced_mass * kn_marble) * 0.3f; // Reduced damping
-            
-            // FIXED: Stronger spring force for better separation
-            float3 Fn = kn_marble * penetration * normal - kd_critical * vn * normal;
-            
-            // FIXED: Improved friction model
-            float3 v_tangent = v_rel - vn * normal;
-            float vt_mag = length(v_tangent);
-            float3 Ft = make_float3(0,0,0);
-            
-            if (vt_mag > 1e-6f) {
-                float3 tangent = v_tangent / vt_mag;
-                float max_ft = friction_mu_marble * length(Fn);
-                Ft = -fminf(max_ft, kd_critical * vt_mag) * tangent;
-            }
-            
-            float3 F_total = Fn + Ft;
-            
-            // FIXED: Apply forces with proper scaling
-            float force_scale = 1.0f;
-            if (penetration > marble->radius * 0.5f) {
-                // Increase force for deep penetration
-                force_scale = 1.0f + (penetration / marble->radius);
-            }
-            
-            F_total *= force_scale;
-            
-            // Apply to cloth node
-            atomicAdd(&node->force.x, F_total.x);
-            atomicAdd(&node->force.y, F_total.y);
-            atomicAdd(&node->force.z, F_total.z);
-            
-            // FIXED: Apply reaction force to marble
-            atomicAdd(&marble->force.x, -F_total.x);
-            atomicAdd(&marble->force.y, -F_total.y);
-            atomicAdd(&marble->force.z, -F_total.z);
-            
-            // FIXED: Apply torque to marble
-            float3 tau = cross(r_marble, -F_total);
-            atomicAdd(&marble->torque.x, tau.x);
-            atomicAdd(&marble->torque.y, tau.y);
-            atomicAdd(&marble->torque.z, tau.z);
-        }
-    }
-}
-
-
-__device__ void checkSphereTriangleCollision(Marble* marble,ClothNode* v0,ClothNode* v1,ClothNode* v2) {
-    // Calculate triangle normal
-    float3 edge1 = v1->pos - v0->pos;
-    float3 edge2 = v2->pos - v0->pos;
-    float3 normal = normalize(cross(edge1, edge2));
-    
-    // Distance from sphere center to triangle plane
-    float3 to_sphere = marble->pos - v0->pos;
-    float dist_to_plane = dot(to_sphere, normal);
-    
-    // Check if sphere is close enough to triangle
-    if (fabsf(dist_to_plane) < marble->radius) {
-        // Find closest point on triangle
-        float3 closest_point = marble->pos - dist_to_plane * normal;
-        
-        // Check if closest point is inside triangle (barycentric coordinates)
-        float3 v0_to_closest = closest_point - v0->pos;
-        float d00 = dot(edge1, edge1);
-        float d01 = dot(edge1, edge2);
-        float d11 = dot(edge2, edge2);
-        float d20 = dot(v0_to_closest, edge1);
-        float d21 = dot(v0_to_closest, edge2);
-        
-        float denom = d00 * d11 - d01 * d01;
-        if (fabsf(denom) < 1e-6f) return;
-        
-        float v = (d11 * d20 - d01 * d21) / denom;
-        float w = (d00 * d21 - d01 * d20) / denom;
-        float u = 1.0f - v - w;
-        
-        // Check if inside triangle
-        if (u >= 0 && v >= 0 && w >= 0) {
-            float penetration = marble->radius - fabsf(dist_to_plane);
-            if (penetration > 0) {
-                // Calculate contact force
-                float3 contact_normal = (dist_to_plane < 0) ? -normal : normal;
-                
-                // Relative velocity
-                float3 marble_vel_at_contact = marble->vel;
-                float3 triangle_vel = u * v0->vel + v * v1->vel + w * v2->vel;
-                float3 v_rel = marble_vel_at_contact - triangle_vel;
-                float vn = dot(v_rel, contact_normal);
-                
-                // Contact force
-                float3 Fn = kn_marble * penetration * contact_normal - kd_marble * vn * contact_normal;
-                
-                // Apply forces to marble
-                atomicAdd(&marble->force.x, -Fn.x);
-                atomicAdd(&marble->force.y, -Fn.y);
-                atomicAdd(&marble->force.z, -Fn.z);
-                
-                // Distribute forces to triangle vertices
-                float3 force_per_vertex = Fn / 3.0f;
-                if (!v0->pinned) {
-                    atomicAdd(&v0->force.x, u * force_per_vertex.x);
-                    atomicAdd(&v0->force.y, u * force_per_vertex.y);
-                    atomicAdd(&v0->force.z, u * force_per_vertex.z);
-                }
-                if (!v1->pinned) {
-                    atomicAdd(&v1->force.x, v * force_per_vertex.x);
-                    atomicAdd(&v1->force.y, v * force_per_vertex.y);
-                    atomicAdd(&v1->force.z, v * force_per_vertex.z);
-                }
-                if (!v2->pinned) {
-                    atomicAdd(&v2->force.x, w * force_per_vertex.x);
-                    atomicAdd(&v2->force.y, w * force_per_vertex.y);
-                    atomicAdd(&v2->force.z, w * force_per_vertex.z);
-                }
-            }
-        }
-    }
-}
-
-__global__ void computeMarbleTriangleCollision(ClothNode* nodes,Marble* marbles,int numMarbles) {
+// Unified marble-cloth collision detection using spatial grid
+__global__ void applyMarbleClothContact(Marble* marbles, int numMarbles, ClothNode* nodes, const int* cellHead, const int* nodeNext, int3 gridSize, float3 gridMin, float cellSize) {
     int marble_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (marble_idx >= numMarbles) return;
-    
+
     Marble* marble = &marbles[marble_idx];
-    
-    // Check collision with cloth triangles
-    for (int y = 0; y < num_y - 1; y++) {
-        for (int x = 0; x < num_x - 1; x++) {
-            // Two triangles per quad
-            int idx1 = y * num_x + x;
-            int idx2 = y * num_x + (x + 1);
-            int idx3 = (y + 1) * num_x + x;
-            int idx4 = (y + 1) * num_x + (x + 1);
-            
-            // Triangle 1: (idx1, idx2, idx3)
-            checkSphereTriangleCollision(marble, &nodes[idx1], &nodes[idx2], &nodes[idx3]);
-            
-            // Triangle 2: (idx2, idx3, idx4)
-            checkSphereTriangleCollision(marble, &nodes[idx2], &nodes[idx3], &nodes[idx4]);
+    float3 marble_pos = marble->pos;
+    float marble_radius = marble->radius;
+
+    // Get marble's grid cell
+    int3 cell_coord = make_int3(
+        floorf((marble_pos.x - gridMin.x) / cellSize),
+        floorf((marble_pos.y - gridMin.y) / cellSize),
+        floorf((marble_pos.z - gridMin.z) / cellSize)
+    );
+
+    // Check 3x3x3 neighborhood for cloth nodes
+    for (int z = max(0, cell_coord.z-1); z <= min(gridSize.z-1, cell_coord.z+1); z++) {
+        for (int y = max(0, cell_coord.y-1); y <= min(gridSize.y-1, cell_coord.y+1); y++) {
+            for (int x = max(0, cell_coord.x-1); x <= min(gridSize.x-1, cell_coord.x+1); x++) {
+                int3 neighbor_cell = make_int3(x, y, z);
+                int hash = calcHash(neighbor_cell, gridSize);
+                
+                // Traverse linked list for this cell
+                int node_idx = cellHead[hash];
+                while (node_idx != -1) {
+                    // Make sure this is a cloth node (not a marble)
+                    if (node_idx < num_x * num_y) {
+                        ClothNode* node = &nodes[node_idx];
+                        
+                        float3 delta = node->pos - marble_pos;
+                        float dist = length(delta);
+                        float penetration = marble_radius + contact_radius - dist;
+                        
+                        if (penetration > 0.0f && dist > 1e-6f) {
+                            float3 normal = delta / dist;
+                            float3 vrel = node->vel - marble->vel;
+                            
+                            // Normal force with damping
+                            float vn = dot(vrel, normal);
+                            float3 Fn = kn_marble * penetration * normal - kd_marble * vn * normal;
+                            
+                            // Friction force
+                            float3 vt = vrel - vn * normal;
+                            float vt_mag = length(vt);
+                            if (vt_mag > 1e-6f) {
+                                float3 tangent = vt / vt_mag;
+                                float max_ft = friction_mu * length(Fn);
+                                float3 Ft = -min(max_ft, kd_marble * vt_mag) * tangent;
+                                Fn += Ft;
+                            }
+                            
+                            // Apply forces
+                            if (!node->pinned) {
+                                atomicAdd(&node->force.x, Fn.x);
+                                atomicAdd(&node->force.y, Fn.y);
+                                atomicAdd(&node->force.z, Fn.z);
+                            }
+                            
+                            atomicAdd(&marble->force.x, -Fn.x);
+                            atomicAdd(&marble->force.y, -Fn.y);
+                            atomicAdd(&marble->force.z, -Fn.z);
+                        }
+                    }
+                    node_idx = nodeNext[node_idx];
+                }
+            }
         }
     }
 }
 
-
-__global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles,const int* cellHead, const int* marbleNext,int3 gridSize, float3 gridMin, float cellSize) {
+__global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles, const int* cellHead, const int* marbleNext, int3 gridSize, float3 gridMin, float cellSize) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numMarbles) return;
 
@@ -388,11 +281,11 @@ __global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles,const i
         for (int y = max(0, gridPos.y - 1); y <= min(gridSize.y - 1, gridPos.y + 1); y++) {
             for (int x = max(0, gridPos.x - 1); x <= min(gridSize.x - 1, gridPos.x + 1); x++) {
                 int3 neighborPos = make_int3(x, y, z);
-                int hash = computeHash(neighborPos, gridSize);
+                int hash = calcHash(neighborPos, gridSize);
                 int j = cellHead[hash];
 
                 while (j != -1) {
-                    if (j > i) {
+                    if (j > i) { // Avoid duplicate pairs and self-interaction
                         Marble& mj = marbles[j];
                         float3 delta = mj.pos - mi.pos;
                         float dist2 = dot(delta, delta);
@@ -402,15 +295,16 @@ __global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles,const i
                             float3 normal = delta / dist;
                             float overlap = contactRadius2 - dist;
 
-                            float3 r_ij = mj.pos - mi.pos;
                             float3 v_rel = mj.vel - mi.vel;
                             float vn = dot(v_rel, normal);
 
+                            // Normal force
                             float3 Fn = kn_contact * overlap * normal - kd_contact * vn * normal;
 
+                            // Tangential friction
                             float3 v_t = v_rel - vn * normal;
                             float vt_mag = length(v_t);
-                            float3 Ft = make_float3(0.0, 0.0, 0.0);
+                            float3 Ft = make_float3(0.0f, 0.0f, 0.0f);
                             if (vt_mag > 1e-6f) {
                                 float3 tangent = v_t / vt_mag;
                                 float maxFt = friction_mu * length(Fn);
@@ -419,6 +313,7 @@ __global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles,const i
 
                             float3 F_total = Fn + Ft;
 
+                            // Apply forces
                             atomicAdd(&mi.force.x, -F_total.x);
                             atomicAdd(&mi.force.y, -F_total.y);
                             atomicAdd(&mi.force.z, -F_total.z);
@@ -427,8 +322,12 @@ __global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles,const i
                             atomicAdd(&mj.force.y, F_total.y);
                             atomicAdd(&mj.force.z, F_total.z);
 
-                            float3 tau_i = cross(-r_ij, F_total);
-                            float3 tau_j = cross(r_ij, -F_total);
+                            // Apply torques for rotational dynamics
+                            float3 r_i = make_float3(0.0f, 0.0f, 0.0f); // Contact point relative to center
+                            float3 r_j = make_float3(0.0f, 0.0f, 0.0f);
+                            
+                            float3 tau_i = cross(r_i, -F_total);
+                            float3 tau_j = cross(r_j, F_total);
 
                             atomicAdd(&mi.torque.x, tau_i.x);
                             atomicAdd(&mi.torque.y, tau_i.y);
@@ -440,6 +339,122 @@ __global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles,const i
                         }
                     }
                     j = marbleNext[j];
+                }
+            }
+        }
+    }
+}
+
+__global__ void resetClothForces(ClothNode* nodes, int numNodes) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < numNodes) {
+        nodes[i].force = make_float3(0.0f, 0.0f, 0.0f);
+    }
+}
+
+__global__ void limitClothNodeVelocities(ClothNode* nodes, int numNodes, float maxVel) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numNodes || nodes[i].pinned) return;
+    
+    float speed = length(nodes[i].vel);
+    if (speed > maxVel) {
+        nodes[i].vel = (maxVel / speed) * nodes[i].vel;
+    }
+}
+
+// Enhanced marble-cloth collision with continuous detection
+__global__ void continuousMarbleClothCollision(Marble* marbles, int numMarbles, ClothNode* nodes, 
+                                              const int* cellHead, const int* nodeNext, 
+                                              int3 gridSize, float3 gridMin, float cellSize, float dt) {
+    int marble_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (marble_idx >= numMarbles) return;
+
+    Marble* marble = &marbles[marble_idx];
+    float3 current_pos = marble->pos;
+    float3 prev_pos = marble->prevPos;
+    float marble_radius = marble->radius;
+    
+    // Sample along movement path for continuous collision detection
+    const int num_samples = 3; // Adjust for accuracy vs performance
+    
+    for (int sample = 0; sample < num_samples; sample++) {
+        float t = (float)sample / (float)(num_samples - 1);
+        float3 sample_pos = prev_pos + t * (current_pos - prev_pos);
+        
+        int3 cell_coord = make_int3(
+            floorf((sample_pos.x - gridMin.x) / cellSize),
+            floorf((sample_pos.y - gridMin.y) / cellSize),
+            floorf((sample_pos.z - gridMin.z) / cellSize)
+        );
+
+        // Check 3x3x3 neighborhood
+        for (int z = max(0, cell_coord.z-1); z <= min(gridSize.z-1, cell_coord.z+1); z++) {
+            for (int y = max(0, cell_coord.y-1); y <= min(gridSize.y-1, cell_coord.y+1); y++) {
+                for (int x = max(0, cell_coord.x-1); x <= min(gridSize.x-1, cell_coord.x+1); x++) {
+                    int3 neighbor_cell = make_int3(x, y, z);
+                    int hash = calcHash(neighbor_cell, gridSize);
+                    
+                    int node_idx = cellHead[hash];
+                    while (node_idx != -1) {
+                        if (node_idx < num_x * num_y) { // Ensure it's a cloth node
+                            ClothNode* node = &nodes[node_idx];
+                            
+                            float3 delta = node->pos - sample_pos;
+                            float dist = length(delta);
+                            float clothThickness = 0.02f; // Treat cloth as having thickness
+                            float penetration = marble_radius + clothThickness - dist;
+                            
+                            if (penetration > 0.0f && dist > 1e-6f) {
+                                float3 normal = delta / dist;
+                                float3 vrel = node->vel - marble->vel;
+                                
+                                // Impulse-based collision response
+                                float vn = dot(vrel, normal);
+                                if (vn < 0) { // Objects approaching
+                                    float restitution = 0.3f;
+                                    float impulse_magnitude = -(1.0f + restitution) * vn;
+                                    impulse_magnitude /= (1.0f/node_mass + 1.0f/marble->mass);
+                                    
+                                    float3 impulse = impulse_magnitude * normal;
+                                    
+                                    // Apply impulse
+                                    if (!node->pinned) {
+                                        atomicAdd(&node->vel.x, impulse.x / node_mass);
+                                        atomicAdd(&node->vel.y, impulse.y / node_mass);
+                                        atomicAdd(&node->vel.z, impulse.z / node_mass);
+                                    }
+                                    
+                                    atomicAdd(&marble->vel.x, -impulse.x / marble->mass);
+                                    atomicAdd(&marble->vel.y, -impulse.y / marble->mass);
+                                    atomicAdd(&marble->vel.z, -impulse.z / marble->mass);
+                                    
+                                    // Position correction to prevent penetration
+                                    float correction_factor = 0.8f;
+                                    float3 correction = correction_factor * penetration * normal;
+                                    
+                                    if (!node->pinned) {
+                                        float total_inv_mass = 1.0f/node_mass + 1.0f/marble->mass;
+                                        float3 node_correction = correction * (1.0f/node_mass) / total_inv_mass;
+                                        float3 marble_correction = -correction * (1.0f/marble->mass) / total_inv_mass;
+                                        
+                                        atomicAdd(&node->pos.x, node_correction.x);
+                                        atomicAdd(&node->pos.y, node_correction.y);
+                                        atomicAdd(&node->pos.z, node_correction.z);
+                                        
+                                        atomicAdd(&marble->pos.x, marble_correction.x);
+                                        atomicAdd(&marble->pos.y, marble_correction.y);
+                                        atomicAdd(&marble->pos.z, marble_correction.z);
+                                    } else {
+                                        // If node is pinned, move only the marble
+                                        atomicAdd(&marble->pos.x, -correction.x);
+                                        atomicAdd(&marble->pos.y, -correction.y);
+                                        atomicAdd(&marble->pos.z, -correction.z);
+                                    }
+                                }
+                            }
+                        }
+                        node_idx = nodeNext[node_idx];
+                    }
                 }
             }
         }

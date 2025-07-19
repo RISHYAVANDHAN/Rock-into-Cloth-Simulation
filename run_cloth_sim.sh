@@ -6,10 +6,9 @@ set -e
 
 echo "Building CUDA cloth simulation..."
 mkdir -p build
-mkdir -p output
 cd build
 cmake -DIMGUI_DIR=$HOME/imgui ..
-make -j
+make clean && make -j
 
 echo "Running simulation..."
 

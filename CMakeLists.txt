@@ -39,12 +39,8 @@ set(SRC_FILES
     ${SRC_DIR}/cloth.cu
     ${SRC_DIR}/params.cu
     ${SRC_DIR}/integrator.cu
-    ${SRC_DIR}/applied_force.cu
-    ${SRC_DIR}/energy.cu
-    ${SRC_DIR}/convergence.cu
-    ${SRC_DIR}/extract_positions.cu
     ${SRC_DIR}/renderer.cpp
-    ${SRC_DIR}/vtk_export.cpp
+    ${SRC_DIR}/extract_positions.cu
     ${SRC_DIR}/spatial_hash.cu
     ${SRC_DIR}/marble.cu
     ${IMGUI_SRC}

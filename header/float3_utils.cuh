@@ -5,6 +5,29 @@
 #include <math.h>
 #include <cstdio>
 
+struct ClothNode {
+    int index;
+    float3 pos;
+    float3 vel;
+    float3 force;
+    bool pinned;
+};
+
+
+struct Marble {
+    float3 pos;
+    float3 prevPos; 
+    float3 vel;
+    float3 angular_vel;
+    float4 orientation;
+    float3 force;
+    float3 torque;
+    float radius;
+    float mass;
+    float inertia;
+};
+
+
 __host__ __device__ inline float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
@@ -46,6 +69,20 @@ __host__ __device__ inline float3 cross(const float3& a, const float3& b) {
 }
 
 __host__ __device__ inline float3& operator+=(float3& a, const float3& b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    return a;
+}
+
+__host__ __device__ inline int3& operator+(int3& a, const int3& b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    return a;
+}
+
+__host__ __device__ inline int3& operator+=(int3& a, const int3& b) {
     a.x += b.x;
     a.y += b.y;
     a.z += b.z;

@@ -2,18 +2,11 @@
 #ifndef CLOTH_CUH
 #define CLOTH_CUH
 
+#pragma once
+
 #include <cuda_runtime.h>
 #include "float3_utils.cuh"
 #include "params.cuh"
-#include "marble.cuh"
-
-struct ClothNode {
-    int index;
-    float3 pos;
-    float3 vel;
-    float3 force;
-    bool pinned;
-};
 
 enum SpringType {
     STRUCTURAL = 0,
@@ -28,16 +21,10 @@ struct Spring {
     int type;
 };
 
-// Add to existing SpringType enum
-enum ContactType {
-    CLOTH_MARBLE = 0,
-    // Add other contact types if needed
-};
+// Function declarations for cloth simulation
+__host__ void initializeClothGrid(ClothNode* d_nodes, int num_x, int num_y, float clothWidth, float clothHeight);
 
-__global__ void computeMarbleClothInteraction(ClothNode* nodes, Marble* marbles, int numMarbles, float dt);
-
-__global__ void applySpringForces(ClothNode* nodes, Spring* springs, int numSprings);
-
+// Force application kernels
 __global__ void applyGravity(ClothNode* nodes);
 
 __global__ void applyViscousDamping(ClothNode* nodes);
@@ -46,17 +33,17 @@ __global__ void resetClothForces(ClothNode* nodes);
 
 __global__ void applyPinningConstraints(ClothNode* nodes);
 
-__host__ void initializeClothGrid(ClothNode* d_nodes, int num_x, int num_y, float clothWidth, float clothHeight);
+__global__ void applySpringForces(ClothNode* nodes, Spring* springs, int numSprings);
 
+// Collision detection kernels
 __global__ void applyClothSelfContact(ClothNode* nodes, const int* cellHead, const int* nodeNext, int3 gridSize, float3 gridMin, float cellSize);
 
-__global__ void computeMarbleClothInteraction(ClothNode* nodes, Marble* marbles, int numMarbles, float dt);
+__global__ void applyMarbleClothContact(Marble* marbles, int numMarbles, ClothNode* nodes, const int* cellHead, const int* nodeNext, int3 gridSize, float3 gridMin, float cellSize);
 
 __global__ void applyMarbleMarbleContact(Marble* marbles, int numMarbles, const int* cellHead, const int* marbleNext, int3 gridSize, float3 gridMin, float cellSize);
 
-__global__ void computeMarbleTriangleCollision(ClothNode* nodes,Marble* marbles,int numMarbles);
+__global__ void limitClothNodeVelocities(ClothNode* nodes, int numNodes, float maxVel);
 
-__device__ void checkSphereTriangleCollision(Marble* marble,ClothNode* v0,ClothNode* v1,ClothNode* v2);
-
+__global__ void resetClothForces(ClothNode* nodes, int numNodes);
 
 #endif
