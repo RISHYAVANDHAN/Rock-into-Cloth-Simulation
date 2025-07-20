@@ -96,7 +96,7 @@ int main() {
     cudaMemcpyFromSymbol(&h_marble_radius_max, marble_radius_max, sizeof(float));
     cudaMemcpyFromSymbol(&h_marble_density, marble_density, sizeof(float));
 
-    // Spatial grid setup - SINGLE GRID FOR ALL COLLISION DETECTION
+    // CLOTH SPATIAL GRID SETUP
     float h_grid_cell_size;
     cudaMemcpyFromSymbol(&h_grid_cell_size, grid_cell_size, sizeof(float));
     float3 grid_min = make_float3(
@@ -116,23 +116,48 @@ int main() {
     );
     int grid_size = grid_dims.x * grid_dims.y * grid_dims.z;
     
-    // Allocate unified spatial grid structures
+    // MARBLE-SPECIFIC SPATIAL GRID SETUP
+    // Calculate marble grid cell size directly 
+    float h_marble_grid_cell_size = 2.0f * h_marble_radius_max * 2.5f;
+    
+    // Marble grid bounds - cover marble spawn area and movement range
+    float3 marble_grid_min = make_float3(
+        -clothWidth/2 - 3*h_marble_radius_max, 
+        -2.0f,
+        -clothHeight/2 - 3*h_marble_radius_max
+    );
+    float3 marble_grid_max = make_float3(
+        clothWidth/2 + 3*h_marble_radius_max,
+        12.0f,
+        clothHeight/2 + 3*h_marble_radius_max
+    );
+    int3 marble_grid_dims = make_int3(
+        ceil((marble_grid_max.x - marble_grid_min.x) / h_marble_grid_cell_size),
+        ceil((marble_grid_max.y - marble_grid_min.y) / h_marble_grid_cell_size),
+        ceil((marble_grid_max.z - marble_grid_min.z) / h_marble_grid_cell_size)
+    );
+    int marble_grid_size = marble_grid_dims.x * marble_grid_dims.y * marble_grid_dims.z;
+    
+    printf("Cloth grid: cell_size=%.3f, dims=(%d,%d,%d), total=%d\n", 
+           h_grid_cell_size, grid_dims.x, grid_dims.y, grid_dims.z, grid_size);
+    printf("Marble grid: cell_size=%.3f, dims=(%d,%d,%d), total=%d\n", 
+           h_marble_grid_cell_size, marble_grid_dims.x, marble_grid_dims.y, marble_grid_dims.z, marble_grid_size);
+    
+    // Allocate cloth spatial grid structures
     int* d_cellHead = nullptr;
     int* d_nodeNext = nullptr;
     cudaMalloc(&d_cellHead, grid_size * sizeof(int));
     cudaMalloc(&d_nodeNext, total_nodes * sizeof(int));
     
-    // Separate marble grid for marble-marble collisions
+    // Allocate marble spatial grid structures (separate from cloth)
     int* d_marbleCellHead = nullptr;
     int* d_marbleNodeNext = nullptr;
-    cudaMalloc(&d_marbleCellHead, grid_size * sizeof(int));
+    cudaMalloc(&d_marbleCellHead, marble_grid_size * sizeof(int));
     cudaMalloc(&d_marbleNodeNext, h_num_marbles * sizeof(int));
 
     // Initialize marbles on host and copy to device
-    initializeMarbles(h_marbles, h_num_marbles, h_marble_radius_min, 
-                     h_marble_radius_max, h_marble_density);
-    cudaMemcpy(d_marbles, h_marbles, h_num_marbles * sizeof(Marble), 
-              cudaMemcpyHostToDevice);
+    initializeMarbles(h_marbles, h_num_marbles, h_marble_radius_min, h_marble_radius_max, h_marble_density);
+    cudaMemcpy(d_marbles, h_marbles, h_num_marbles * sizeof(Marble), cudaMemcpyHostToDevice);
 
     // Initialize renderer
     initRenderer(h_num_x, h_num_y, h_num_marbles);
@@ -176,34 +201,27 @@ int main() {
             cudaDeviceSynchronize();
             
             // PHASE 3: BUILD SPATIAL GRIDS
+            // Build cloth grid (for cloth-cloth and marble-cloth collisions)
             cudaMemset(d_cellHead, -1, grid_size * sizeof(int));
             extractPositions<<<blocks, threads>>>(d_nodes, d_clothPositions, total_nodes);
-            buildSpatialLinkedList<<<blocks, threads>>>(d_clothPositions, d_cellHead, d_nodeNext, 
-                                                    total_nodes, grid_dims, grid_min, h_grid_cell_size);
+            buildSpatialLinkedList<<<blocks, threads>>>(d_clothPositions, d_cellHead, d_nodeNext, total_nodes, grid_dims, grid_min, h_grid_cell_size);
             cudaDeviceSynchronize();
 
-            cudaMemset(d_marbleCellHead, -1, grid_size * sizeof(int));
-            insertMarblesToGrid<<<marbleBlocks, marbleThreads>>>(d_marbles, d_marbleCellHead, 
-                                                                d_marbleNodeNext, h_num_marbles, 
-                                                                grid_dims, grid_min, h_grid_cell_size);
+            // Build marble grid (for marble-marble collisions only)
+            cudaMemset(d_marbleCellHead, -1, marble_grid_size * sizeof(int));
+            insertMarblesToGrid<<<marbleBlocks, marbleThreads>>>(d_marbles, d_marbleCellHead, d_marbleNodeNext, h_num_marbles, marble_grid_dims, marble_grid_min, h_marble_grid_cell_size);
             cudaDeviceSynchronize();
             
             // PHASE 4: COLLISION DETECTION & RESPONSE
-            applyClothSelfContact<<<blocks, threads>>>(d_nodes, d_cellHead, d_nodeNext, 
-                                                    grid_dims, grid_min, h_grid_cell_size);
+            applyClothSelfContact<<<blocks, threads>>>(d_nodes, d_cellHead, d_nodeNext, grid_dims, grid_min, h_grid_cell_size);
+            continuousMarbleClothCollision<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, d_nodes, d_cellHead, d_nodeNext, grid_dims, grid_min, h_grid_cell_size, dt);
             
-            continuousMarbleClothCollision<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, d_nodes,
-                                                                        d_cellHead, d_nodeNext,
-                                                                        grid_dims, grid_min, h_grid_cell_size, dt);
-            
-            computeMarbleMarbleInteraction<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, 
-                                                                        d_marbleCellHead, d_marbleNodeNext, 
-                                                                        grid_dims, grid_min, h_grid_cell_size);
+            // FIXED: Use marble-specific grid parameters for marble-marble collisions
+            computeMarbleMarbleInteraction<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, d_marbleCellHead, d_marbleNodeNext, marble_grid_dims, marble_grid_min, h_marble_grid_cell_size);
             cudaDeviceSynchronize();
             
             // PHASE 5: VELOCITY LIMITING (Before Integration)
-            limitMarbleVelocities<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, 
-                                                                MAX_MARBLE_VELOCITY, 10.0f);
+            limitMarbleVelocities<<<marbleBlocks, marbleThreads>>>(d_marbles, h_num_marbles, MAX_MARBLE_VELOCITY, 10.0f);
             limitClothNodeVelocities<<<blocks, threads>>>(d_nodes, total_nodes, MAX_CLOTH_NODE_VELOCITY);
             cudaDeviceSynchronize();
             

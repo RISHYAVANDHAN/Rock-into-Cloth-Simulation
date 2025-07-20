@@ -60,7 +60,7 @@ __global__ void buildSpatialLinkedList(
 __global__ void insertMarblesToGrid(
     Marble* marbles, 
     int* cellHead, 
-    int* marbleNext,
+    int* marbleNodeNext,
     int numMarbles, 
     int3 gridSize, 
     float3 gridMin, 
@@ -77,11 +77,11 @@ __global__ void insertMarblesToGrid(
     // Check bounds
     if (gridPos.x < 0 || gridPos.y < 0 || gridPos.z < 0 ||
         gridPos.x >= gridSize.x || gridPos.y >= gridSize.y || gridPos.z >= gridSize.z) {
-        marbleNext[i] = -1;  // Mark as invalid
+        marbleNodeNext[i] = -1;  // Mark as invalid
         return;
     }
 
     // Compute hash and insert into linked list
     uint hash = calcHash(gridPos, gridSize);
-    marbleNext[i] = atomicExch(&cellHead[hash], i);
+    marbleNodeNext[i] = atomicExch(&cellHead[hash], i);
 }

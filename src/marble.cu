@@ -138,21 +138,20 @@ __global__ void updateMarblePositionsAndOrientations(Marble* marbles, int numMar
     }
 }
 
-__global__ void computeMarbleMarbleInteraction(
-    Marble* marbles, int numMarbles,
-    int* cellHead, int* nodeNext,
-    int3 gridSize, float3 gridMin, float cellSize
-) {
+__global__ void computeMarbleMarbleInteraction(Marble* marbles, int numMarbles,int* cellHead, int* marbleNodeNext,int3 gridSize, float3 gridMin, float cellSize) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= numMarbles) return;
 
     float3 pos_i = marbles[i].pos;
+    
+    // Use consistent grid position calculation
     int3 cell_coord = make_int3(
         floorf((pos_i.x - gridMin.x) / cellSize),
         floorf((pos_i.y - gridMin.y) / cellSize),
         floorf((pos_i.z - gridMin.z) / cellSize)
     );
 
+    // Check neighboring cells
     for (int dz = -1; dz <= 1; dz++) {
         for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
@@ -166,30 +165,31 @@ __global__ void computeMarbleMarbleInteraction(
                     neighbor_cell.y < 0 || neighbor_cell.y >= gridSize.y ||
                     neighbor_cell.z < 0 || neighbor_cell.z >= gridSize.z)
                     continue;
-
+                // Use consistent hash calculation
                 int hash = calcHash(neighbor_cell, gridSize);
                 int j = cellHead[hash];
-
+                // Traverse the linked list using the correct array
                 while (j != -1) {
-                    if (j > i) {
-                        Marble* mj = &marbles[j];
-                        float3 delta = mj->pos - pos_i;
+                    if (j != i && j > i) { // Avoid self-collision and double-processing
+                        float3 pos_j = marbles[j].pos;
+                        float3 delta = pos_j - pos_i;
                         float dist = length(delta);
 
-                        float min_sep = (marbles[i].radius + mj->radius) * 1.05f;
+                        float min_sep = marbles[i].radius + marbles[j].radius;
+                        
                         if (dist < min_sep && dist > 1e-6f) {
                             float3 normal = delta / dist;
                             float overlap = min_sep - dist;
-
+                            // Contact point and relative velocity calculation
                             float3 contact_pt = pos_i + normal * marbles[i].radius;
                             float3 r_i = contact_pt - pos_i;
-                            float3 r_j = contact_pt - mj->pos;
+                            float3 r_j = contact_pt - pos_j;
 
                             float3 v_i = marbles[i].vel + cross(marbles[i].angular_vel, r_i);
-                            float3 v_j = mj->vel + cross(mj->angular_vel, r_j);
+                            float3 v_j = marbles[j].vel + cross(marbles[j].angular_vel, r_j);
                             float3 v_rel = v_j - v_i;
                             float vn = dot(v_rel, normal);
-
+                            // Force calculation (keep your existing values)
                             float repulsion = kn_marble_marble * overlap;
                             if (overlap > 0.02f * min_sep) {
                                 float k = overlap / min_sep;
@@ -197,26 +197,26 @@ __global__ void computeMarbleMarbleInteraction(
                             }
 
                             float3 Fn = repulsion * normal - kd_marble * vn * normal;
-
+                            // Apply forces with proper atomic operations
                             atomicAdd(&marbles[i].force.x, -Fn.x);
                             atomicAdd(&marbles[i].force.y, -Fn.y);
                             atomicAdd(&marbles[i].force.z, -Fn.z);
 
-                            atomicAdd(&mj->force.x, Fn.x);
-                            atomicAdd(&mj->force.y, Fn.y);
-                            atomicAdd(&mj->force.z, Fn.z);
-
+                            atomicAdd(&marbles[j].force.x, Fn.x);
+                            atomicAdd(&marbles[j].force.y, Fn.y);
+                            atomicAdd(&marbles[j].force.z, Fn.z);
+                            // Apply torques
                             float3 tau_i = cross(r_i, -Fn);
                             float3 tau_j = cross(r_j, Fn);
                             atomicAdd(&marbles[i].torque.x, tau_i.x);
                             atomicAdd(&marbles[i].torque.y, tau_i.y);
                             atomicAdd(&marbles[i].torque.z, tau_i.z);
-                            atomicAdd(&mj->torque.x, tau_j.x);
-                            atomicAdd(&mj->torque.y, tau_j.y);
-                            atomicAdd(&mj->torque.z, tau_j.z);
+                            atomicAdd(&marbles[j].torque.x, tau_j.x);
+                            atomicAdd(&marbles[j].torque.y, tau_j.y);
+                            atomicAdd(&marbles[j].torque.z, tau_j.z);
                         }
                     }
-                    j = nodeNext[j];
+                    j = marbleNodeNext[j];  // <- Use consistent array name
                 }
             }
         }

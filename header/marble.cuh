@@ -13,7 +13,7 @@ __global__ void updateMarbleVelocities(Marble* marbles, int numMarbles, float dt
 
 __global__ void updateMarblePositionsAndOrientations(Marble* marbles, int numMarbles, float dt);
 
-__global__ void computeMarbleMarbleInteraction(Marble* marbles, int numMarbles, int* cellHead, int* nodeNext, int3 gridSize, float3 gridMin, float cellSize);
+__global__ void computeMarbleMarbleInteraction(Marble* marbles, int numMarbles, int* cellHead, int* marbleNodeNext, int3 gridSize, float3 gridMin, float cellSize);
 
 __global__ void extractMarblePositions(Marble* marbles, float3* positions, int numMarbles);  
 
