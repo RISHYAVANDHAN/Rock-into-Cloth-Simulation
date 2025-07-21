@@ -1,4 +1,4 @@
-// ==================== main.cu (FIXED) ====================
+// ==================== main.cu ====================
 #include <iostream>
 #include <cuda_runtime.h>
 #include <vector>
@@ -173,9 +173,9 @@ int main() {
     const int threads = BLOCK_SIZE;
     const int blocks = (total_nodes + threads - 1) / threads;
 
-    #define NUM_SUBSTEPS 2
-    #define MAX_MARBLE_VELOCITY 10.0f
-    #define MAX_CLOTH_NODE_VELOCITY 8.0f
+    #define NUM_SUBSTEPS 1
+    #define MAX_MARBLE_VELOCITY 5.0f
+    #define MAX_CLOTH_NODE_VELOCITY 5.0f
     #define MIN_TIMESTEP 0.0001f
     #define MAX_TIMESTEP 0.002f
 
